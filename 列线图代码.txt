@@ -1,0 +1,327 @@
+# ============================================================
+# 完整代码：心力衰竭预测模型列线图分析
+# 包含：数据读取、建模、5张高质量期刊级别图片
+# ============================================================
+
+# 1. 加载包
+library(rms)
+library(pROC)
+library(rmda)
+library(ggplot2)
+library(dplyr)
+library(ResourceSelection)
+library(patchwork)
+
+# 设置工作目录
+setwd("~/Step 2")
+
+# ============================================================
+# 颜色主题（期刊高级配色）
+# ============================================================
+color_3gene <- "#c82423"      # 酒红色
+color_ift20 <- "#286090"      # 深蓝色
+color_ideal <- "#707070"      # 浅灰色
+color_black <- "#000000"      # 黑色
+
+# ============================================================
+# 主题函数
+# ============================================================
+theme_publication <- function() {
+  theme_minimal() +
+    theme(
+      text = element_text(family = "Arial"),
+      axis.title = element_text(size = 11, family = "Arial"),
+      axis.text = element_text(size = 9, family = "Arial"),
+      legend.text = element_text(size = 9, family = "Arial"),
+      plot.title = element_text(size = 12, face = "bold", family = "Arial"),
+      panel.border = element_rect(fill = NA, color = "black", linewidth = 0.8),
+      panel.grid = element_blank(),
+      axis.line = element_line(linewidth = 0.8),
+      legend.position = "bottom",
+      legend.key.size = unit(0.8, "cm")
+    )
+}
+
+# ============================================================
+# 2. 数据读取与处理
+# ============================================================
+cat("=== 步骤1: 读取数据 ===\n")
+
+expr <- read.csv("GSE116250_Final_GeneSymbol_Matrix.csv", row.names = 1)
+group_info <- read.csv("GSE116250_Sample_Groups.csv")
+
+# 重命名列
+group_info <- rename(group_info, sample_id = SampleID)
+
+# 转置表达矩阵
+expr_t <- as.data.frame(t(expr))
+expr_t$sample_id <- rownames(expr_t)
+
+# 合并
+df_all <- inner_join(expr_t, group_info, by = "sample_id")
+
+# 构建二分类结局：DCM + ICM = HF (1)，NF = 0
+df_all$y <- ifelse(df_all$Group %in% c("DCM", "ICM"), 1, 0)
+
+# 建模数据
+df_model <- df_all %>% select(y, DUSP11, IFT20, KPNA2) %>% na.omit()
+cat(paste("建模样本数:", nrow(df_model), "\n"))
+cat("结局分布:\n")
+print(table(df_model$y))
+
+# 标准化
+df_model[, c("DUSP11", "IFT20", "KPNA2")] <- scale(df_model[, c("DUSP11", "IFT20", "KPNA2")])
+
+# ============================================================
+# 3. Logistic回归建模
+# ============================================================
+cat("=== 步骤2: 建模 ===\n")
+
+dd <- datadist(df_model)
+options(datadist = "dd")
+
+lrm_fit <- lrm(y ~ DUSP11 + IFT20 + KPNA2, data = df_model, x = TRUE, y = TRUE)
+print(summary(lrm_fit))
+
+# 预测概率
+pred_prob <- predict(lrm_fit, type = "fitted")
+
+# ============================================================
+# 4. ROC曲线 (图B)
+# ============================================================
+cat("=== 步骤3: 绘制ROC曲线 (图B) ===\n")
+
+roc_ift20 <- roc(df_model$y, df_model$IFT20)
+roc_3gene <- roc(df_model$y, pred_prob)
+
+# 提取数据
+roc_data_ift20 <- data.frame(
+  specificity = 1 - roc_ift20$specificities,
+  sensitivity = roc_ift20$sensitivities,
+  group = "IFT20"
+)
+roc_data_3gene <- data.frame(
+  specificity = 1 - roc_3gene$specificities,
+  sensitivity = roc_3gene$sensitivities,
+  group = "3-gene"
+)
+roc_data <- rbind(roc_data_ift20, roc_data_3gene)
+
+# AUC
+auc_ift20 <- round(auc(roc_ift20), 3)
+auc_3gene <- round(auc(roc_3gene), 3)
+auc_ci <- round(ci.auc(roc_3gene, method = "delong"), 3)
+delong_p <- roc.test(roc_ift20, roc_3gene, method = "delong")$p.value
+delong_p <- round(delong_p, 4)
+
+# 绘图
+roc_plot <- ggplot(roc_data, aes(x = specificity, y = sensitivity, color = group)) +
+  geom_line(linewidth = 1.1) +
+  geom_abline(intercept = 0, slope = 1, color = color_ideal, linetype = 2, linewidth = 0.8) +
+  scale_color_manual(values = c("IFT20" = color_ift20, "3-gene" = color_3gene)) +
+  scale_x_continuous(limits = c(0, 1), expand = c(0.01, 0.01)) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0.01, 0.01)) +
+  labs(x = "Specificity", y = "Sensitivity", title = "B") +
+  theme_publication() +
+  theme(legend.position = "none") +
+  annotate("text", x = 0.20, y = 0.90, 
+           label = paste("IFT20 (AUC =", auc_ift20, ")"), 
+           color = color_ift20, size = 9/ggplot2:::.pt, family = "Arial", hjust = 0) +
+  annotate("text", x = 0.20, y = 0.83, 
+           label = paste("3-gene (AUC =", auc_3gene, ")"), 
+           color = color_3gene, size = 9/ggplot2:::.pt, family = "Arial", hjust = 0) +
+  annotate("text", x = 0.20, y = 0.05, 
+           label = paste("DeLong's test P =", delong_p), 
+           color = "black", size = 9/ggplot2:::.pt, family = "Arial", hjust = 0)
+
+ggsave("Figure_B_ROC.pdf", plot = roc_plot, width = 5, height = 4.5, device = cairo_pdf)
+cat("✅ 图B ROC曲线已保存\n")
+
+# ============================================================
+# 5. DCA决策曲线 (图A) - base R版本
+# ============================================================
+cat("=== 步骤4: 绘制DCA曲线 (图A) ===\n")
+
+dca_obj <- decision_curve(y ~ DUSP11 + IFT20 + KPNA2,
+                          data = df_model,
+                          family = binomial,
+                          thresholds = seq(0, 1, by = 0.01))
+
+dca_data <- dca_obj$derived.data
+thresholds <- dca_data$thresholds
+
+# 计算 None 和 All
+prev <- mean(df_model$y)
+none <- rep(0, length(thresholds))
+all <- prev - (1 - prev) * thresholds / (1 - thresholds)
+all[is.infinite(all)] <- NA
+
+pdf("Figure_A_DCA.pdf", width = 5, height = 4.5, family = "Arial")
+par(mar = c(4.5, 4.5, 2.5, 2), mgp = c(2.8, 0.8, 0), cex.lab = 1.1, cex.axis = 0.9, las = 1)
+plot(0, 0, type = "n", xlim = c(0, 1), ylim = c(-0.05, 0.4),
+     xlab = "High-Risk Threshold", ylab = "Net Benefit", main = "A",
+     frame = FALSE, axes = FALSE)
+box(lwd = 0.8)
+axis(1, lwd = 0.8, cex.axis = 0.9)
+axis(2, lwd = 0.8, cex.axis = 0.9)
+lines(thresholds, none, col = "black", lwd = 1.1)
+lines(thresholds, all, col = "#d3d3d3", lwd = 1.1, na.rm = TRUE)
+lines(thresholds, dca_data$NB, col = color_3gene, lwd = 1.1)
+legend("topright", legend = c("3-gene signature", "None", "All"),
+       col = c(color_3gene, "black", "#d3d3d3"), lwd = 1.1, bty = "n", cex = 0.9)
+dev.off()
+cat("✅ 图A DCA曲线已保存\n")
+
+# ============================================================
+# 6. Bootstrap校准曲线 (图C)
+# ============================================================
+cat("=== 步骤5: 绘制校准曲线 (图C) ===\n")
+
+cal_fit <- calibrate(lrm_fit, method = "boot", B = 1000)
+cal_data <- as.data.frame(cal_fit)
+colnames(cal_data) <- c("predicted", "observed", "apparent", "bias_corrected")
+
+mae <- round(mean(abs(cal_data$observed - cal_data$bias_corrected), na.rm = TRUE), 3)
+
+cal_plot <- ggplot() +
+  geom_abline(intercept = 0, slope = 1, color = color_ideal, linetype = 2, linewidth = 0.9) +
+  geom_line(data = cal_data, aes(x = predicted, y = apparent), 
+            color = "black", linetype = 4, linewidth = 0.9) +
+  geom_line(data = cal_data, aes(x = predicted, y = bias_corrected), 
+            color = "black", linewidth = 1.1) +
+  scale_x_continuous(limits = c(0, 1), expand = c(0.01, 0.01)) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0.01, 0.01)) +
+  labs(x = "Predicted HF Probability", y = "Observed HF Proportion", title = "C") +
+  theme_publication() +
+  theme(legend.position = "none") +
+  annotate("text", x = 0.60, y = 0.10, label = "Ideal", 
+           color = color_ideal, size = 9/ggplot2:::.pt, family = "Arial", hjust = 0) +
+  annotate("text", x = 0.60, y = 0.05, label = "Bias-corrected", 
+           color = "black", size = 9/ggplot2:::.pt, family = "Arial", hjust = 0)
+
+ggsave("Figure_C_Calibration.pdf", plot = cal_plot, width = 5, height = 4.5, device = cairo_pdf)
+cat("✅ 图C 校准曲线已保存\n")
+cat(paste("Mean absolute error:", mae, "\n"))
+
+# ============================================================
+# 7. 森林图 (图D)
+# ============================================================
+cat("=== 步骤6: 绘制森林图 (图D) ===\n")
+
+glm_fit <- glm(y ~ DUSP11 + IFT20 + KPNA2, data = df_model, family = binomial())
+coef_summary <- summary(glm_fit)$coefficients
+exp_coef <- exp(coef(glm_fit))
+exp_ci <- exp(confint(glm_fit))
+
+forest_data <- data.frame(
+  Gene = c("DUSP11", "IFT20", "KPNA2"),
+  OR = exp_coef[2:4],
+  Lower = exp_ci[2:4, 1],
+  Upper = exp_ci[2:4, 2],
+  P_value = coef_summary[2:4, 4],
+  stringsAsFactors = FALSE
+)
+
+forest_data$P_sig <- ifelse(forest_data$P_value < 0.001, "***",
+                           ifelse(forest_data$P_value < 0.01, "**",
+                                  ifelse(forest_data$P_value < 0.05, "*", "ns")))
+forest_data$Gene <- factor(forest_data$Gene, levels = forest_data$Gene[order(forest_data$OR)])
+forest_data$label <- paste0(round(forest_data$OR, 2), " (", 
+                            round(forest_data$Lower, 2), "-", 
+                            round(forest_data$Upper, 2), ")")
+forest_data$color <- ifelse(forest_data$Gene %in% c("IFT20", "KPNA2"), color_ift20, "#808080")
+
+forest_plot <- ggplot(forest_data, aes(x = OR, y = Gene)) +
+  geom_vline(xintercept = 1, color = color_3gene, linewidth = 1) +
+  geom_point(aes(color = color), size = 4, show.legend = FALSE) +
+  geom_errorbarh(aes(xmin = Lower, xmax = Upper, color = color), 
+                 height = 0.15, linewidth = 0.9, show.legend = FALSE) +
+  scale_color_identity() +
+  scale_x_log10(breaks = c(0.5, 1, 2, 4, 8), labels = c("0.5", "1", "2", "4", "8")) +
+  labs(x = "Odds Ratio (95% CI)", y = "", title = "D") +
+  theme_publication() +
+  theme(axis.text.y = element_text(size = 10, family = "Arial"),
+        axis.title.x = element_text(size = 11, family = "Arial"),
+        panel.grid.major.x = element_line(color = "#f0f0f0", linewidth = 0.5)) +
+  geom_text(aes(x = Upper * 1.15, label = label), size = 9/ggplot2:::.pt, family = "Arial", hjust = 0) +
+  geom_text(aes(x = Upper * 1.6, label = P_sig), size = 10/ggplot2:::.pt, family = "Arial", hjust = 0, color = "black")
+
+ggsave("Figure_D_Forest.pdf", plot = forest_plot, width = 7, height = 4.5, device = cairo_pdf)
+cat("✅ 图D 森林图已保存\n")
+
+# ============================================================
+# 8. Nomogram列线图 (图E)
+# ============================================================
+cat("=== 步骤7: 绘制列线图 (图E) ===\n")
+
+nom <- nomogram(lrm_fit,
+                fun = plogis,
+                funlabel = "Probability of Heart Failure",
+                fun.at = c(0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+                lp = TRUE)
+
+pdf("Figure_E_Nomogram.pdf", width = 7, height = 5, family = "Arial")
+plot(nom)
+dev.off()
+cat("✅ 图E 列线图已保存\n")
+
+# ============================================================
+# 9. Hosmer-Lemeshow检验
+# ============================================================
+cat("=== 步骤8: Hosmer-Lemeshow检验 ===\n")
+
+hl_res <- hoslem.test(lrm_fit$y, pred_prob, g = 10)
+print(hl_res)
+
+# ============================================================
+# 10. 组合所有图片为 Figure 4
+# ============================================================
+cat("=== 步骤9: 组合为Figure 4 ===\n")
+
+# 重新加载图片（确保图A用base R绘制，用ggplot重新读取）
+# 由于图A是base R绘制的，我们需要用ggplot重新绘制以便组合
+
+# 重新用ggplot绘制图A（用于组合）
+dca_plot_gg <- ggplot() +
+  geom_line(data = dca_data, aes(x = thresholds, y = 0), color = "black", linewidth = 1.1) +
+  geom_line(data = dca_data, aes(x = thresholds, y = all), color = "#d3d3d3", linewidth = 1.1, na.rm = TRUE) +
+  geom_line(data = dca_data, aes(x = thresholds, y = NB), color = color_3gene, linewidth = 1.1) +
+  scale_x_continuous(limits = c(0, 1), expand = c(0.01, 0.01)) +
+  scale_y_continuous(limits = c(-0.05, 0.4), expand = c(0.01, 0.01)) +
+  labs(x = "High-Risk Threshold", y = "Net Benefit", title = "A") +
+  theme_publication() +
+  theme(legend.position = "none") +
+  annotate("text", x = 0.75, y = 0.35, label = "3-gene signature", 
+           color = color_3gene, size = 9/ggplot2:::.pt, family = "Arial", hjust = 0) +
+  annotate("text", x = 0.75, y = 0.28, label = "None", 
+           color = "black", size = 9/ggplot2:::.pt, family = "Arial", hjust = 0) +
+  annotate("text", x = 0.75, y = 0.21, label = "All", 
+           color = "#d3d3d3", size = 9/ggplot2:::.pt, family = "Arial", hjust = 0)
+
+# 组合：上面3个（A, B, C），下面2个（D, E）
+combined <- (dca_plot_gg | roc_plot | cal_plot) /
+            (forest_plot | plot_spacer() | plot_spacer()) +
+            plot_annotation(tag_levels = 'A')
+
+# 保存组合图
+ggsave("Figure4_Combined.pdf",
+       plot = combined,
+       width = 16, height = 12,
+       dpi = 300,
+       device = cairo_pdf)
+cat("✅ Figure4 组合图已保存\n")
+
+# ============================================================
+# 11. 输出模型性能指标
+# ============================================================
+cat("\n=== 模型性能指标汇总 ===\n")
+cat(paste("AUC (IFT20单独):", auc_ift20, "\n"))
+cat(paste("AUC (三基因联合):", auc_3gene, "\n"))
+cat(paste("AUC 95% CI:", paste(auc_ci, collapse = " - "), "\n"))
+cat(paste("DeLong检验 P值:", delong_p, "\n"))
+cat(paste("Hosmer-Lemeshow P值:", round(hl_res$p.value, 4), "\n"))
+cat(paste("样本量:", nrow(df_model), "\n"))
+cat(paste("事件数:", sum(df_model$y == 1), "\n"))
+cat(paste("非事件数:", sum(df_model$y == 0), "\n"))
+
+cat("\n🎉 所有分析已完成！\n")

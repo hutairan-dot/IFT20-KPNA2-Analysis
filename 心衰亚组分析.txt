@@ -1,0 +1,269 @@
+# ============================================================
+# 计算 PD 特征评分
+# ============================================================
+
+# 使用三个基因计算 PD 评分（Z-score 标准化后取平均）
+core_matrix <- as.matrix(core_expr[, c("IFT20", "DUSP11", "KPNA2")])
+core_matrix_scaled <- scale(core_matrix)
+PD_score <- rowMeans(core_matrix_scaled, na.rm = TRUE)
+
+core_expr$PD_Score <- PD_score
+cat("PD 评分范围:", range(PD_score, na.rm = TRUE), "\n")
+
+# ============================================================
+# 1. 三组箱线图 (NF / DCM / ICM)
+# ============================================================
+
+plot_data <- core_expr[core_expr$Group %in% c("NF", "DCM", "ICM"), ]
+plot_data$Group <- factor(plot_data$Group, levels = c("NF", "DCM", "ICM"))
+
+# 1.1 IFT20 三组箱线图
+p_ift20 <- ggplot(plot_data, aes(x = Group, y = IFT20, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.6) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  stat_compare_means(method = "kruskal.test", 
+                     label = "p.format",
+                     label.y = max(plot_data$IFT20, na.rm = TRUE) * 1.05,
+                     size = 4) +
+  stat_compare_means(comparisons = list(c("NF", "DCM"), c("NF", "ICM"), c("DCM", "ICM")),
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     size = 4) +
+  labs(title = "IFT20 在 NF/DCM/ICM 中的表达",
+       x = "", y = "log2(RPKM+1)") +
+  scale_fill_manual(values = c(NF = "#4DAF4A", DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+
+ggsave("boxplot_IFT20_3groups.png", p_ift20, width = 6, height = 6, dpi = 300)
+cat("已保存: boxplot_IFT20_3groups.png\n")
+
+# 1.2 DUSP11 三组箱线图
+p_dusp11 <- ggplot(plot_data, aes(x = Group, y = DUSP11, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.6) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  stat_compare_means(method = "kruskal.test", 
+                     label = "p.format",
+                     label.y = max(plot_data$DUSP11, na.rm = TRUE) * 1.05,
+                     size = 4) +
+  stat_compare_means(comparisons = list(c("NF", "DCM"), c("NF", "ICM"), c("DCM", "ICM")),
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     size = 4) +
+  labs(title = "DUSP11 在 NF/DCM/ICM 中的表达",
+       x = "", y = "log2(RPKM+1)") +
+  scale_fill_manual(values = c(NF = "#4DAF4A", DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+
+ggsave("boxplot_DUSP11_3groups.png", p_dusp11, width = 6, height = 6, dpi = 300)
+cat("已保存: boxplot_DUSP11_3groups.png\n")
+
+# 1.3 KPNA2 三组箱线图
+p_kpna2 <- ggplot(plot_data, aes(x = Group, y = KPNA2, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.6) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  stat_compare_means(method = "kruskal.test", 
+                     label = "p.format",
+                     label.y = max(plot_data$KPNA2, na.rm = TRUE) * 1.05,
+                     size = 4) +
+  stat_compare_means(comparisons = list(c("NF", "DCM"), c("NF", "ICM"), c("DCM", "ICM")),
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     size = 4) +
+  labs(title = "KPNA2 在 NF/DCM/ICM 中的表达",
+       x = "", y = "log2(RPKM+1)") +
+  scale_fill_manual(values = c(NF = "#4DAF4A", DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+
+ggsave("boxplot_KPNA2_3groups.png", p_kpna2, width = 6, height = 6, dpi = 300)
+cat("已保存: boxplot_KPNA2_3groups.png\n")
+
+# 1.4 PD 评分三组箱线图
+p_pd <- ggplot(plot_data, aes(x = Group, y = PD_Score, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.6) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.5) +
+  stat_compare_means(method = "kruskal.test", 
+                     label = "p.format",
+                     label.y = max(plot_data$PD_Score, na.rm = TRUE) * 1.05,
+                     size = 4) +
+  stat_compare_means(comparisons = list(c("NF", "DCM"), c("NF", "ICM"), c("DCM", "ICM")),
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     size = 4) +
+  labs(title = "PD 特征评分在 NF/DCM/ICM 中的分布",
+       subtitle = "基于 IFT20 + DUSP11 + KPNA2 的 Z-score 平均",
+       x = "", y = "PD 特征评分") +
+  scale_fill_manual(values = c(NF = "#4DAF4A", DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.subtitle = element_text(hjust = 0.5, size = 10))
+
+ggsave("boxplot_PD_score_3groups.png", p_pd, width = 6, height = 6, dpi = 300)
+cat("已保存: boxplot_PD_score_3groups.png\n")
+
+# ============================================================
+# 2. DCM vs ICM 比较
+# ============================================================
+
+dcm_icm_data <- plot_data[plot_data$Group %in% c("DCM", "ICM"), ]
+dcm_icm_data$Group <- factor(dcm_icm_data$Group, levels = c("DCM", "ICM"))
+
+# 2.1 IFT20 DCM vs ICM
+p_ift20_dcm <- ggplot(dcm_icm_data, aes(x = Group, y = IFT20, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.5) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.6) +
+  stat_compare_means(method = "wilcox.test", 
+                     label = "p.format",
+                     label.y = max(dcm_icm_data$IFT20, na.rm = TRUE) * 1.05,
+                     size = 5) +
+  labs(title = "IFT20 在 DCM vs ICM 中的表达",
+       x = "", y = "log2(RPKM+1)",
+       subtitle = "非缺血性 vs 缺血性心肌病") +
+  scale_fill_manual(values = c(DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+ggsave("boxplot_IFT20_DCM_vs_ICM.png", p_ift20_dcm, width = 5, height = 6, dpi = 300)
+cat("已保存: boxplot_IFT20_DCM_vs_ICM.png\n")
+
+# 2.2 PD 评分 DCM vs ICM
+p_pd_dcm <- ggplot(dcm_icm_data, aes(x = Group, y = PD_Score, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.5) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.6) +
+  stat_compare_means(method = "wilcox.test", 
+                     label = "p.format",
+                     label.y = max(dcm_icm_data$PD_Score, na.rm = TRUE) * 1.05,
+                     size = 5) +
+  labs(title = "PD 特征评分在 DCM vs ICM 中的比较",
+       x = "", y = "PD 特征评分",
+       subtitle = "非缺血性 vs 缺血性心肌病") +
+  scale_fill_manual(values = c(DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.subtitle = element_text(hjust = 0.5, size = 11))
+
+ggsave("boxplot_PD_score_DCM_vs_ICM.png", p_pd_dcm, width = 5, height = 6, dpi = 300)
+cat("已保存: boxplot_PD_score_DCM_vs_ICM.png\n")
+
+# ============================================================
+# 3. PD 评分与年龄的相关性
+# ============================================================
+
+age_data <- data.frame(
+  Sample = sample_info_aligned$ID,
+  Age = sample_info_aligned$Age,
+  PD_Score = PD_score,
+  Group = sample_info_aligned$Group,
+  stringsAsFactors = FALSE
+)
+
+p_age <- ggplot(age_data, aes(x = Age, y = PD_Score, color = Group)) +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed") +
+  stat_cor(method = "pearson", 
+           label.x = min(age_data$Age, na.rm = TRUE) + 2,
+           label.y = max(age_data$PD_Score, na.rm = TRUE) * 0.95,
+           size = 4) +
+  labs(title = "PD 特征评分与年龄的相关性",
+       x = "年龄 (岁)",
+       y = "PD 特征评分") +
+  scale_color_manual(values = c(NF = "#4DAF4A", DCM = "#E41A1C", ICM = "#FF7F00")) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        legend.position = "bottom")
+
+ggsave("scatter_PD_score_vs_Age.png", p_age, width = 8, height = 6, dpi = 300)
+cat("已保存: scatter_PD_score_vs_Age.png\n")
+
+# ============================================================
+# 4. 组合图
+# ============================================================
+
+library(patchwork)
+
+# 第一行：三个基因的箱线图
+row1 <- (p_ift20 + p_dusp11 + p_kpna2) + plot_layout(ncol = 3)
+
+# 第二行：PD 评分 + DCM vs ICM
+row2 <- (p_pd + p_pd_dcm) + plot_layout(ncol = 2)
+
+# 第三行：年龄相关性
+row3 <- p_age
+
+# 组合
+combined_plot <- (row1) / (row2) / (row3) + 
+  plot_annotation(title = "GSE116250 亚组分析汇总",
+                  theme = theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 18)))
+
+ggsave("subgroup_analysis_combined.png", combined_plot, width = 16, height = 18, dpi = 300)
+cat("已保存: subgroup_analysis_combined.png\n")
+
+# ============================================================
+# 5. 保存统计结果
+# ============================================================
+
+# 三组统计
+stats_list <- list()
+
+stats_list$IFT20_3groups <- aggregate(IFT20 ~ Group, data = plot_data, 
+                                      FUN = function(x) c(mean = mean(x), sd = sd(x), median = median(x)))
+
+stats_list$DUSP11_3groups <- aggregate(DUSP11 ~ Group, data = plot_data, 
+                                       FUN = function(x) c(mean = mean(x), sd = sd(x), median = median(x)))
+
+stats_list$KPNA2_3groups <- aggregate(KPNA2 ~ Group, data = plot_data, 
+                                      FUN = function(x) c(mean = mean(x), sd = sd(x), median = median(x)))
+
+stats_list$PD_Score_3groups <- aggregate(PD_Score ~ Group, data = plot_data, 
+                                         FUN = function(x) c(mean = mean(x), sd = sd(x), median = median(x)))
+
+# DCM vs IC M Wilcoxon 检验
+wilcox_ift20 <- wilcox.test(IFT20 ~ Group, data = dcm_icm_data)
+wilcox_dusp11 <- wilcox.test(DUSP11 ~ Group, data = dcm_icm_data)
+wilcox_kpna2 <- wilcox.test(KPNA2 ~ Group, data = dcm_icm_data)
+wilcox_pd <- wilcox.test(PD_Score ~ Group, data = dcm_icm_data)
+
+stats_list$DCM_vs_ICM_pvalues <- data.frame(
+  Gene = c("IFT20", "DUSP11", "KPNA2", "PD_Score"),
+  P_Value = c(wilcox_ift20$p.value, wilcox_dusp11$p.value, 
+              wilcox_kpna2$p.value, wilcox_pd$p.value)
+)
+
+# 年龄相关性
+cor_test <- cor.test(age_data$Age, age_data$PD_Score, use = "complete.obs")
+stats_list$Age_correlation <- data.frame(
+  Method = "Pearson",
+  Correlation = cor_test$estimate,
+  P_Value = cor_test$p.value
+)
+
+write_xlsx(stats_list, "GSE116250_subgroup_statistics.xlsx")
+cat("已保存: GSE116250_subgroup_statistics.xlsx\n")
+
+# ============================================================
+# 6. 输出文件清单
+# ============================================================
+
+cat("\n========================================\n")
+cat("=== 亚组分析完成！输出文件清单 ===\n")
+cat("========================================\n")
+cat("1. boxplot_IFT20_3groups.png - IFT20 三组箱线图\n")
+cat("2. boxplot_DUSP11_3groups.png - DUSP11 三组箱线图\n")
+cat("3. boxplot_KPNA2_3groups.png - KPNA2 三组箱线图\n")
+cat("4. boxplot_PD_score_3groups.png - PD 评分三组箱线图\n")
+cat("5. boxplot_IFT20_DCM_vs_ICM.png - IFT20 DCM vs ICM\n")
+cat("6. boxplot_PD_score_DCM_vs_ICM.png - PD 评分 DCM vs ICM\n")
+cat("7. scatter_PD_score_vs_Age.png - PD 评分与年龄散点图\n")
+cat("8. subgroup_analysis_combined.png - 组合图\n")
+cat("9. GSE116250_subgroup_statistics.xlsx - 统计结果\n")
+cat("\n")
+

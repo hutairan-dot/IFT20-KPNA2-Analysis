@@ -1,0 +1,93 @@
+# ============================================================
+# 手动实现 MR-Egger 多效性检验
+# ============================================================
+
+# 使用之前已经准备好的数据
+# exposure_aligned, outcome_aligned, mr_estimates, mr_se
+
+cat("\n=== MR-Egger 多效性检验 ===\n")
+
+# 1. 准备数据
+# MR-Egger 回归：beta_outcome ~ beta_exposure
+# 截距项显著 ≠ 0 表示存在水平多效性
+beta_exp <- exposure_aligned$beta
+beta_out <- outcome_aligned$beta
+se_out <- outcome_aligned$se
+
+# 2. MR-Egger 回归（加权回归，权重 = 1/se_out^2）
+weights <- 1 / se_out^2
+egger_fit <- lm(beta_out ~ beta_exp, weights = weights)
+
+# 3. 提取结果
+egger_intercept <- coef(egger_fit)[1]   # 截距（多效性）
+egger_slope <- coef(egger_fit)[2]       # 斜率（因果效应）
+egger_intercept_se <- summary(egger_fit)$coefficients[1, 2]
+egger_slope_se <- summary(egger_fit)$coefficients[2, 2]
+egger_intercept_p <- summary(egger_fit)$coefficients[1, 4]
+egger_slope_p <- summary(egger_fit)$coefficients[2, 4]
+
+# 4. 输出结果
+cat("\n========== MR-Egger 回归结果 ==========\n")
+cat("截距（多效性）：", round(egger_intercept, 4), "\n")
+cat("截距标准误：", round(egger_intercept_se, 4), "\n")
+cat("截距 P 值：", format(egger_intercept_p, scientific = TRUE, digits = 3), "\n")
+cat("\n斜率（因果效应）：", round(egger_slope, 4), "\n")
+cat("斜率标准误：", round(egger_slope_se, 4), "\n")
+cat("斜率 P 值：", format(egger_slope_p, scientific = TRUE, digits = 3), "\n")
+cat("OR 值（Egger）：", round(exp(egger_slope), 3), "\n")
+cat("95% CI：", round(exp(egger_slope - 1.96 * egger_slope_se), 3), 
+    "-", round(exp(egger_slope + 1.96 * egger_slope_se), 3), "\n")
+
+# 5. 多效性判断
+cat("\n========== 多效性判断 ==========\n")
+if (egger_intercept_p < 0.05) {
+  cat("⚠️ 截距显著（P =", format(egger_intercept_p, digits = 3), "），存在水平多效性\n")
+  cat("建议谨慎解读 MR 结果\n")
+} else {
+  cat("✅ 截距不显著（P =", format(egger_intercept_p, digits = 3), "），无显著水平多效性\n")
+  cat("MR 结果稳健\n")
+}
+
+# 6. 绘制 MR-Egger 图
+library(ggplot2)
+
+# 准备绘图数据
+plot_df <- data.frame(
+  beta_exp = beta_exp,
+  beta_out = beta_out,
+  se_out = se_out
+)
+
+p_egger <- ggplot(plot_df, aes(x = beta_exp, y = beta_out)) +
+  geom_point(size = 3, alpha = 0.7, color = "#0072B5") +
+  geom_errorbar(aes(ymin = beta_out - 1.96 * se_out, 
+                    ymax = beta_out + 1.96 * se_out), 
+                width = 0.01, alpha = 0.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "#D55E00", fill = "gray80") +
+  labs(
+    title = "MR-Egger Regression: IFT20 eQTL vs Heart Failure",
+    x = "SNP effect on IFT20 expression (beta)",
+    y = "SNP effect on Heart Failure (beta)"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave("results_MR/MR_Egger_plot.pdf", p_egger, width = 6, height = 5)
+cat("✅ MR-Egger 图已保存：results_MR/MR_Egger_plot.pdf\n")
+
+# 7. 保存完整结果
+mr_egger_results <- data.frame(
+  Method = "MR-Egger",
+  Intercept = egger_intercept,
+  Intercept_SE = egger_intercept_se,
+  Intercept_P = egger_intercept_p,
+  Beta = egger_slope,
+  SE = egger_slope_se,
+  P_value = egger_slope_p,
+  OR = exp(egger_slope),
+  OR_lower = exp(egger_slope - 1.96 * egger_slope_se),
+  OR_upper = exp(egger_slope + 1.96 * egger_slope_se)
+)
+
+write.csv(mr_egger_results, "results_MR/IFT20_MR_Egger_results.csv", row.names = FALSE)
+cat("✅ MR-Egger 结果已保存\n")
+

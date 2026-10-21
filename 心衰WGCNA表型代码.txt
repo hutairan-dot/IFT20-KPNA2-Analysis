@@ -1,0 +1,87 @@
+# ============================================================
+# Step 2 完整数据准备（从头开始，可复制粘贴运行）
+# ============================================================
+
+library(GEOquery)
+library(GSVA)
+library(GSEABase)
+
+setwd("D:/zhuomian/生信小论文/Step 2")
+
+# ---------- 1. 加载表达矩阵 ----------
+rpkm_data <- read.table("GSE116250_rpkm.txt.gz", header = TRUE, sep = "\t",
+                        stringsAsFactors = FALSE, check.names = FALSE)
+rpkm_data <- rpkm_data[!duplicated(rpkm_data$Gene), ]
+rownames(rpkm_data) <- rpkm_data$Gene
+rpkm_data$Gene <- NULL
+rpkm_data$Common_name <- NULL
+exprSet <- as.matrix(rpkm_data)
+
+# 转换 ENSEMBL → Symbol（如果还是ENSEMBL的话）
+if (grepl("^ENSG", rownames(exprSet)[1])) {
+  library(org.Hs.eg.db)
+  ensembl_ids <- rownames(exprSet)
+  symbol_map <- AnnotationDbi::select(org.Hs.eg.db, keys = ensembl_ids, 
+                                      columns = "SYMBOL", keytype = "ENSEMBL")
+  symbol_map <- symbol_map[!duplicated(symbol_map$ENSEMBL), ]
+  common <- intersect(ensembl_ids, symbol_map$ENSEMBL)
+  exprSet <- exprSet[common, ]
+  symbols <- symbol_map$SYMBOL[match(common, symbol_map$ENSEMBL)]
+  exprSet <- aggregate(exprSet, by = list(Symbol = symbols), FUN = median)
+  rownames(exprSet) <- exprSet$Symbol
+  exprSet$Symbol <- NULL
+  exprSet <- as.matrix(exprSet)
+}
+
+cat("表达矩阵维度:", dim(exprSet), "\n")
+
+# ---------- 2. 加载基因集 + 计算 ssGSEA ----------
+gene_sets <- getGmt("h.all.v2026.1.Hs.symbols.gmt")
+target_names <- c("HALLMARK_INFLAMMATORY_RESPONSE",
+                  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+                  "HALLMARK_ANGIOGENESIS",
+                  "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY",
+                  "HALLMARK_APOPTOSIS")
+gs_list <- gene_sets[target_names]
+
+param <- ssgseaParam(exprSet, gs_list)
+ssgsea_score <- gsva(param, verbose = FALSE)
+ssgsea_df <- as.data.frame(t(ssgsea_score))
+cat("ssGSEA 评分维度:", dim(ssgsea_df), "\n")
+
+# ---------- 3. 构建表型矩阵 ----------
+gse <- getGEO("GSE116250", GSEMatrix = TRUE, getGPL = FALSE)
+pheno <- pData(gse[[1]])
+
+trait <- data.frame(
+  age = as.numeric(pheno$`age:ch1`),
+  sex = ifelse(grepl("^M", pheno$`Sex:ch1`, ignore.case = TRUE), 1, 0),
+  hf  = ifelse(grepl("^DCM|^ICM", pheno$title), 1, 0),   # DCM 和 ICM 都是心衰
+  row.names = pheno$title
+)
+
+# ---------- 4. 对齐 ----------
+common <- intersect(colnames(exprSet), rownames(trait))
+common <- intersect(common, rownames(ssgsea_df))
+
+exprSet   <- exprSet[, common]
+trait     <- trait[common, ]
+ssgsea_df <- ssgsea_df[common, ]
+
+# 合并
+trait <- cbind(trait, ssgsea_df)
+trait <- na.omit(trait)
+
+# 最终对齐
+exprSet <- exprSet[, rownames(trait)]
+
+# ---------- 5. 保存 ----------
+write.csv(trait, "Phenotype_matrix_for_WGCNA.csv")
+saveRDS(exprSet, "ExprSet_aligned.rds")
+
+# ---------- 6. 验证 ----------
+cat("\n=== 最终结果 ===\n")
+cat("表达矩阵:", dim(exprSet), "\n")
+cat("表型矩阵:", dim(trait), "\n")
+print(table(trait$hf, dnn = "心衰状态(0=对照,1=心衰)"))
+head(trait[, 1:5])

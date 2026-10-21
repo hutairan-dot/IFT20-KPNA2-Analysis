@@ -1,0 +1,210 @@
+# ============================================================
+# GSE116250 WGCNA 重新运行（修正版）
+# ============================================================
+
+setwd("D:/zhuomian/生信小论文/Step 2")
+if(!dir.exists("results_WGCNA_HF_v2")) dir.create("results_WGCNA_HF_v2")
+
+library(WGCNA)
+enableWGCNAThreads()
+
+# 1. 读取数据
+cat("读取 GSE116250_rpkm.txt.gz...\n")
+expr_raw <- read.delim(gzfile("GSE116250_rpkm.txt.gz"), 
+                       header = TRUE, check.names = FALSE, stringsAsFactors = FALSE)
+
+# 处理基因名
+gene_names <- expr_raw[, 1]
+expr_raw <- expr_raw[!duplicated(gene_names), ]
+rownames(expr_raw) <- gene_names[!duplicated(gene_names)]
+expr_raw <- expr_raw[, -1]
+expr_raw <- as.data.frame(lapply(expr_raw, as.numeric))
+rownames(expr_raw) <- gene_names[!duplicated(gene_names)][1:nrow(expr_raw)]
+
+# 转置：行=样本，列=基因
+datExpr <- as.data.frame(t(expr_raw))
+cat("样本数：", nrow(datExpr), "，基因数：", ncol(datExpr), "\n")
+
+# 2. 表型数据
+phenotype <- read.csv("Phenotype_matrix_for_WGCNA.csv", row.names = 1, check.names = FALSE)
+common_samples <- intersect(rownames(phenotype), rownames(datExpr))
+datExpr <- datExpr[common_samples, ]
+datTraits <- phenotype[common_samples, ]
+
+# 3. 方差过滤
+m.vars <- apply(datExpr, 2, var, na.rm = TRUE)
+m.vars <- m.vars[is.finite(m.vars)]
+var_cut <- quantile(m.vars, probs = 0.2, na.rm = TRUE)
+datExpr <- datExpr[, m.vars > var_cut]
+cat("方差过滤后：", ncol(datExpr), "个基因\n")
+
+# 4. 坏基因过滤
+gsg <- goodSamplesGenes(datExpr, verbose = 0)
+if (!gsg$allOK) {
+  datExpr <- datExpr[, gsg$goodGenes]
+}
+cat("坏基因过滤后：", ncol(datExpr), "个基因\n")
+
+# 5. 样本聚类（检测离群样本）
+sampleTree <- hclust(dist(datExpr), method = "average")
+pdf("results_WGCNA_HF_v2/01_Sample_dendrogram.pdf", width = 12, height = 8)
+par(cex = 0.6)
+plot(sampleTree, main = "Sample clustering", sub = "", xlab = "")
+abline(h = 200, col = "red")
+dev.off()
+cat("✅ 样本聚类图已保存\n")
+
+# 6. 软阈值筛选
+powers <- c(1:10, seq(12, 30, by = 2))
+sft <- pickSoftThreshold(datExpr, powerVector = powers, networkType = "signed", verbose = 0)
+
+# 保存软阈值图（修正）
+pdf("results_WGCNA_HF_v2/02_Soft_threshold.pdf", width = 10, height = 5)
+par(mfrow = c(1, 2))
+# 左图
+plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)", ylab = "Scale Free Topology R^2",
+     main = "Scale independence", type = "n")
+text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = 0.9, col = "red")
+abline(h = 0.85, col = "red")
+# 右图
+plot(sft$fitIndices[, 1], sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)", ylab = "Mean Connectivity",
+     main = "Mean connectivity", type = "n")
+text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, cex = 0.9, col = "red")
+dev.off()
+cat("✅ 软阈值图已保存\n")
+
+# 选择power
+fitTab <- sft$fitIndices
+candidate <- fitTab[fitTab$SFT.R.sq >= 0.85, ]
+if (nrow(candidate) > 0) {
+  power <- min(candidate$Power)
+} else {
+  power <- fitTab$Power[which.max(fitTab$SFT.R.sq)]
+}
+power <- max(power, 6)
+cat("选定软阈值 power =", power, "\n")
+
+# 7. 构建网络
+cat("正在构建网络（可能需要几分钟）...\n")
+net <- blockwiseModules(
+  as.matrix(datExpr),
+  power = power,
+  TOMType = "signed",
+  minModuleSize = 30,
+  reassignThreshold = 0,
+  mergeCutHeight = 0.25,
+  numericLabels = TRUE,
+  pamRespectsDendro = FALSE,
+  saveTOMs = FALSE,
+  maxBlockSize = 5000,
+  verbose = 2
+)
+
+# 8. 提取结果
+mergedColors <- labels2colors(net$colors)
+MEs <- net$MEs
+geneTree <- net$dendrograms[[1]]
+
+# 模块统计
+cat("\n模块统计：\n")
+print(table(mergedColors))
+
+# 9. 基因聚类树（修正）
+pdf("results_WGCNA_HF_v2/03_Gene_dendrogram.pdf", width = 14, height = 8)
+plotDendroAndColors(
+  dendro = geneTree,
+  colors = mergedColors,
+  groupLabels = "Modules",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05
+)
+dev.off()
+cat("✅ 基因聚类树已保存\n")
+
+# 10. 模块-表型关联（修正：使用MEs_ordered，确保行名正确）
+trait_cols <- c("age", "sex", "hf", "Inflammation", "EMT", "Angiogenesis", "ROS", "Apoptosis")
+trait_cols <- trait_cols[trait_cols %in% colnames(datTraits)]
+datTraits_numeric <- as.data.frame(lapply(datTraits[, trait_cols], as.numeric))
+rownames(datTraits_numeric) <- rownames(datTraits)
+colnames(datTraits_numeric) <- c("Age", "Sex", "HF", "Inflammation", "EMT", "Angiogenesis", "ROS", "Apoptosis")
+
+MEs_ordered <- orderMEs(MEs)
+
+# 确保样本顺序一致
+common_rownames <- intersect(rownames(datTraits_numeric), rownames(MEs_ordered))
+MEs_ordered <- MEs_ordered[common_rownames, ]
+datTraits_numeric <- datTraits_numeric[common_rownames, ]
+
+moduleTraitCor <- cor(MEs_ordered, datTraits_numeric, use = "p")
+moduleTraitP <- corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# 热图（修正：纵坐标应为模块名称）
+pdf("results_WGCNA_HF_v2/04_Module_trait_heatmap.pdf", width = 14, height = max(10, ncol(MEs_ordered) * 0.6))
+par(mar = c(10, 8, 2, 2))
+textMatrix <- paste0(round(moduleTraitCor, 2), "\n(", signif(moduleTraitP, 2), ")")
+dim(textMatrix) <- dim(moduleTraitCor)
+
+labeledHeatmap(
+  Matrix = moduleTraitCor,
+  xLabels = colnames(datTraits_numeric),
+  yLabels = rownames(moduleTraitCor),  # 使用模块名称
+  textMatrix = textMatrix,
+  colors = blueWhiteRed(50),
+  zlim = c(-1, 1),
+  cex.text = 0.6,
+  cex.lab = 0.7
+)
+dev.off()
+cat("✅ 模块-表型热图已保存\n")
+
+# 11. 提取显著模块
+sigDF <- data.frame()
+for (i in 1:nrow(moduleTraitCor)) {
+  for (j in 1:ncol(moduleTraitCor)) {
+    if (!is.na(moduleTraitP[i, j]) && moduleTraitP[i, j] < 0.05) {
+      sigDF <- rbind(sigDF, data.frame(
+        Module = rownames(moduleTraitCor)[i],
+        Trait = colnames(moduleTraitCor)[j],
+        Correlation = moduleTraitCor[i, j],
+        Pvalue = moduleTraitP[i, j]
+      ))
+    }
+  }
+}
+write.csv(sigDF, "results_WGCNA_HF_v2/05_Significant_module_traits.csv", row.names = FALSE)
+
+cat("\n========== 显著模块-表型关联 ==========\n")
+if (nrow(sigDF) > 0) {
+  print(sigDF)
+} else {
+  cat("未找到显著关联\n")
+}
+
+# 12. 检查核心基因
+cat("\n========================================\n")
+cat("PD核心基因在心衰模块中的位置\n")
+cat("========================================\n")
+
+pd_core_ensg <- c("ENSG00000144048", "ENSG00000109083", "ENSG00000182481")
+pd_core_names <- c("DUSP11", "IFT20", "KPNA2")
+
+for (i in 1:length(pd_core_ensg)) {
+  ensg <- pd_core_ensg[i]
+  name <- pd_core_names[i]
+  matched <- rownames(expr_raw)[grep(ensg, rownames(expr_raw))]
+  if (length(matched) > 0 && matched[1] %in% names(mergedColors)) {
+    mod <- mergedColors[matched[1]]
+    cat(name, "：模块", mod, "\n")
+  } else {
+    cat(name, "：未找到或不在模块中\n")
+  }
+}
+
+save.image("results_WGCNA_HF_v2/WGCNA_HF_workspace.RData")
+cat("\n✅ 完成！结果保存在 results_WGCNA_HF_v2/\n")
+

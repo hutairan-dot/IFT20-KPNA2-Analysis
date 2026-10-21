@@ -1,0 +1,248 @@
+# ============================================================
+# Step 3：跨疾病验证 - GSE116250 外部验证
+# 3.1 PD特征评分 ROC
+# 3.2 箱线图 + 临床相关性
+# 3.3 联合评分 vs 单基因 AUC 对比
+# 3.4 置换检验（1000次）
+# ============================================================
+
+setwd("D:/zhuomian/生信小论文/Step 2")
+if(!dir.exists("results_cross_valid")) dir.create("results_cross_valid")
+
+library(pROC)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(tidyr)
+
+# ============================================================
+# 0. 读取数据
+# ============================================================
+
+cat("读取 GSE116250 表达数据...\n")
+expr_raw <- read.delim(gzfile("GSE116250_rpkm.txt.gz"), 
+                       header = TRUE, check.names = FALSE, stringsAsFactors = FALSE)
+
+# 处理基因名
+gene_names <- expr_raw[, 1]
+expr_raw <- expr_raw[!duplicated(gene_names), ]
+rownames(expr_raw) <- gene_names[!duplicated(gene_names)]
+expr_raw <- expr_raw[, -1]
+expr_raw <- as.data.frame(lapply(expr_raw, as.numeric))
+rownames(expr_raw) <- gene_names[!duplicated(gene_names)][1:nrow(expr_raw)]
+
+# 样本分组
+sample_names <- colnames(expr_raw)
+group <- ifelse(grepl("^NF", sample_names), "Normal", "HeartFailure")
+
+cat("总样本：", length(group), "（正常：", sum(group == "Normal"), "，心衰：", sum(group == "HeartFailure"), "）\n")
+
+# 核心基因 ENSG ID
+core_ensg <- c("ENSG00000144048", "ENSG00000109083", "ENSG00000182481")
+core_names <- c("DUSP11", "IFT20", "KPNA2")
+
+# 提取核心基因表达
+core_expr <- data.frame(row.names = sample_names)
+for (i in 1:length(core_ensg)) {
+  matched <- rownames(expr_raw)[grep(core_ensg[i], rownames(expr_raw))]
+  if (length(matched) > 0) {
+    core_expr[, core_names[i]] <- as.numeric(expr_raw[matched[1], ])
+  } else {
+    core_expr[, core_names[i]] <- NA
+  }
+}
+
+# ============================================================
+# 3.1 PD 特征评分 + ROC 曲线
+# ============================================================
+
+cat("\n=== 3.1 PD 特征评分 ROC ===\n")
+
+# 计算 Z-score 均值评分
+core_expr_scaled <- scale(core_expr)
+pd_score <- rowMeans(core_expr_scaled, na.rm = TRUE)
+
+# ROC 曲线
+roc_pd <- roc(as.numeric(group == "HeartFailure"), pd_score)
+auc_pd <- as.numeric(roc_pd$auc)
+
+cat("PD 特征评分 AUC =", round(auc_pd, 4), "\n")
+
+# 保存 ROC 图
+pdf("results_cross_valid/3.1_PD_signature_ROC.pdf", width = 6, height = 6)
+plot(roc_pd, main = paste("PD Signature Score\nAUC =", round(auc_pd, 4)), 
+     col = "#0072B5", lwd = 2, print.auc = TRUE, print.auc.x = 0.6, print.auc.y = 0.3)
+dev.off()
+cat("✅ 3.1 ROC 已保存\n")
+
+# ============================================================
+# 3.2 箱线图 + 临床相关性
+# ============================================================
+
+cat("\n=== 3.2 箱线图 ===\n")
+
+# 读取表型数据
+phenotype <- read.csv("Phenotype_matrix_for_WGCNA.csv", row.names = 1, check.names = FALSE)
+phenotype <- phenotype[rownames(core_expr), ]
+
+# 3.2a PD 特征评分箱线图
+plot_data <- data.frame(
+  Group = group,
+  PD_Score = pd_score
+)
+
+p_box_pd <- ggplot(plot_data, aes(x = Group, y = PD_Score, fill = Group)) +
+  geom_boxplot(width = 0.6, outlier.size = 1.5) +
+  geom_jitter(width = 0.15, size = 1.2, alpha = 0.6) +
+  scale_fill_manual(values = c("Normal" = "#0072B5", "HeartFailure" = "#D55E00")) +
+  stat_compare_means(method = "t.test", label.x = 1.2, size = 4) +
+  labs(title = "PD Signature Score", x = "", y = "Score") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+
+ggsave("results_cross_valid/3.2_PD_score_boxplot.pdf", p_box_pd, width = 5, height = 5)
+cat("✅ PD 评分箱线图已保存\n")
+
+# 3.2b 单基因箱线图（3个基因）
+for (gene in core_names) {
+  plot_data_gene <- data.frame(
+    Group = group,
+    Expression = core_expr[, gene]
+  )
+  
+  p_gene <- ggplot(plot_data_gene, aes(x = Group, y = Expression, fill = Group)) +
+    geom_boxplot(width = 0.6, outlier.size = 1.5) +
+    geom_jitter(width = 0.15, size = 1.2, alpha = 0.6) +
+    scale_fill_manual(values = c("Normal" = "#0072B5", "HeartFailure" = "#D55E00")) +
+    stat_compare_means(method = "t.test", label.x = 1.2, size = 4) +
+    labs(title = gene, x = "", y = "Expression (RPKM)") +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+  
+  ggsave(paste0("results_cross_valid/3.2_", gene, "_boxplot.pdf"), p_gene, width = 5, height = 5)
+}
+cat("✅ 单基因箱线图已保存\n")
+
+# 3.2c 临床相关性（如果有 LVEF 或 NT-proBNP）
+if ("LVEF" %in% colnames(phenotype)) {
+  cor_test <- cor.test(pd_score, phenotype$LVEF, method = "pearson")
+  cat("PD 评分 vs LVEF：R =", round(cor_test$estimate, 3), "，P =", format(cor_test$p.value, scientific = TRUE, digits = 3), "\n")
+  
+  plot_cor <- data.frame(PD_Score = pd_score, LVEF = phenotype$LVEF)
+  p_cor <- ggplot(plot_cor, aes(x = PD_Score, y = LVEF)) +
+    geom_point(size = 2, alpha = 0.7, color = "#0072B5") +
+    geom_smooth(method = "lm", se = TRUE, color = "black") +
+    annotate("text", x = -Inf, y = Inf, 
+             label = paste("R =", round(cor_test$estimate, 3), "\nP =", format(cor_test$p.value, scientific = TRUE, digits = 3)),
+             hjust = -0.1, vjust = 1.5, size = 4) +
+    labs(title = "PD Score vs LVEF", x = "PD Score", y = "LVEF (%)") +
+    theme_minimal(base_size = 12)
+  ggsave("results_cross_valid/3.2_PD_score_vs_LVEF.pdf", p_cor, width = 5, height = 5)
+}
+
+# ============================================================
+# 3.3 联合评分 vs 单基因 AUC 对比
+# ============================================================
+
+cat("\n=== 3.3 AUC 对比 ===\n")
+
+# 计算单基因 AUC
+single_auc <- data.frame()
+for (gene in core_names) {
+  roc_gene <- roc(as.numeric(group == "HeartFailure"), core_expr[, gene])
+  single_auc <- rbind(single_auc, data.frame(
+    Gene = gene,
+    AUC = round(as.numeric(roc_gene$auc), 4)
+  ))
+}
+
+single_auc <- rbind(single_auc, data.frame(Gene = "PD_Combined", AUC = round(auc_pd, 4)))
+cat("AUC 对比：\n")
+print(single_auc)
+
+# 保存 AUC 对比表
+write.csv(single_auc, "results_cross_valid/3.3_AUC_comparison.csv", row.names = FALSE)
+
+# AUC 对比图
+auc_plot <- ggplot(single_auc, aes(x = reorder(Gene, AUC), y = AUC, fill = Gene)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_fill_manual(values = c("DUSP11" = "#D55E00", "IFT20" = "#009E73", 
+                               "KPNA2" = "#CC79A7", "PD_Combined" = "#0072B5")) +
+  coord_flip() +
+  labs(title = "AUC Comparison", x = "", y = "AUC") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+
+ggsave("results_cross_valid/3.3_AUC_comparison.pdf", auc_plot, width = 5, height = 4)
+cat("✅ AUC 对比图已保存\n")
+
+# ============================================================
+# 3.4 置换检验（1000次）
+# ============================================================
+
+cat("\n=== 3.4 置换检验 ===\n")
+
+set.seed(123)
+n_perm <- 1000
+all_genes <- rownames(expr_raw)
+auc_random <- numeric(n_perm)
+
+cat("开始 1000 次随机抽样...\n")
+for (i in 1:n_perm) {
+  random_genes <- sample(all_genes, 3)
+  random_expr <- expr_raw[random_genes, ]
+  random_expr_scaled <- scale(t(random_expr))
+  random_score <- rowMeans(random_expr_scaled, na.rm = TRUE)
+  roc_random <- roc(as.numeric(group == "HeartFailure"), random_score, quiet = TRUE)
+  auc_random[i] <- as.numeric(roc_random$auc)
+  if (i %% 100 == 0) cat("  已完成", i, "次\n")
+}
+
+p_value <- mean(auc_random >= auc_pd)
+
+cat("\n========== 置换检验结果 ==========\n")
+cat("观察到的 AUC：", round(auc_pd, 4), "\n")
+cat("随机 AUC 均值：", round(mean(auc_random), 4), "\n")
+cat("随机 AUC 标准差：", round(sd(auc_random), 4), "\n")
+cat("P 值：", p_value, "\n")
+cat(ifelse(p_value < 0.05, "✅ 显著优于随机！\n", "⚠️ 未达到统计学显著性\n"))
+
+# 保存置换检验结果
+perm_result <- data.frame(
+  Metric = c("Observed AUC", "Random Mean", "Random SD", "P value"),
+  Value = c(round(auc_pd, 4), round(mean(auc_random), 4), round(sd(auc_random), 4), p_value)
+)
+write.csv(perm_result, "results_cross_valid/3.4_Permutation_result.csv", row.names = FALSE)
+
+# 置换检验分布图
+perm_data <- data.frame(AUC = auc_random)
+p_perm <- ggplot(perm_data, aes(x = AUC)) +
+  geom_histogram(bins = 50, fill = "gray70", color = "gray30", alpha = 0.8) +
+  geom_vline(xintercept = auc_pd, color = "red", linewidth = 1.2) +
+  annotate("text", x = auc_pd + 0.02, y = Inf, 
+           label = paste("Observed AUC =", round(auc_pd, 4)), 
+           vjust = 2, hjust = 0, size = 4, color = "red") +
+  labs(
+    title = "Random Permutation Test (1000 iterations)",
+    x = "AUC of Random 3-Gene Signatures",
+    y = "Frequency"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave("results_cross_valid/3.4_Permutation_test.pdf", p_perm, width = 6, height = 5)
+cat("✅ 置换检验图已保存\n")
+
+# ============================================================
+# 汇总输出
+# ============================================================
+
+cat("\n========================================\n")
+cat("✅ Step 3 跨疾病验证完成！\n")
+cat("========================================\n")
+cat("3.1 PD 特征评分 AUC：", round(auc_pd, 4), "\n")
+cat("3.3 AUC 对比：\n")
+print(single_auc)
+cat("3.4 置换检验 P 值：", p_value, "\n")
+cat("========================================\n")
+cat("结果保存在：results_cross_valid/\n")

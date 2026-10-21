@@ -1,0 +1,170 @@
+# ============================================================
+# 计算炎症评分 + 腹膜损伤评分（纯手动 Z-score 计算）
+# 不依赖任何外部函数，100% 可用
+# ============================================================
+
+# 1. 加载包（只需要 dplyr 和基础包）
+library(dplyr)
+
+setwd("D:/zhuomian/生信小论文/Step 1")
+
+# ============================================================
+# 2. 读取过滤后的基因水平表达矩阵
+# ============================================================
+expr_gene <- read.delim("GSE125498_过滤后基因水平表达矩阵.txt", 
+                        header = TRUE, 
+                        row.names = 1, 
+                        check.names = FALSE)
+
+cat("表达矩阵维度：", dim(expr_gene), "\n")
+cat("样本数：", ncol(expr_gene), "\n")
+
+# 转换为 matrix
+expr_matrix <- as.matrix(expr_gene)
+mode(expr_matrix) <- "numeric"
+
+# ============================================================
+# 3. 定义两个基因集（与之前一致）
+# ============================================================
+peritoneal_injury_genes <- c(
+  "TGFB1", "TGFB2", "TGFBR1", "TGFBR2", 
+  "SMAD2", "SMAD3", "SMAD7", 
+  "CDH1", "VIM", "SNAI1", "SNAI2", "TWIST1", "ZEB1", "ZEB2",
+  "COL1A1", "COL1A2", "COL3A1", 
+  "MMP2", "MMP9", "TIMP1", "TIMP2",
+  "IL6", "TNF", "IL1B", 
+  "CTGF", "CCL2", "SERPINE1", "SPP1"
+)
+
+inflammatory_genes_manual <- c(
+  "IL6", "IL1B", "TNF", "IFNG", "IL10", "IL12A", "IL12B", "IL23A",
+  "CXCL8", "CXCL1", "CXCL2", "CXCL3", "CCL2", "CCL3", "CCL4", "CCL5",
+  "NFKB1", "NFKB2", "RELA", "REL", "RELB", "STAT1", "STAT3", "IRF1", "IRF7",
+  "TNFRSF1A", "TNFRSF1B", "IL1R1", "IL1R2", "IL6R", "IL6ST",
+  "PTGS2", "PLAUR", "SERPINE1", "ICAM1", "VCAM1", "SELE", "CD14",
+  "C3", "CFB", "CFD", "C1S", "C2",
+  "MYD88", "TIRAP", "TOLLIP", "TRAF6", "MAP3K7", "IKBKB", "IKBKG", "CHUK"
+)
+
+# ============================================================
+# 4. 手动计算基因集评分的函数（纯手动 Z-score）
+#    步骤：
+#    ① 对每个基因，计算其在所有样本中的均值和标准差
+#    ② 将每个基因的表达值转换为 Z-score
+#    ③ 对基因集内所有基因的 Z-score 取平均值
+# ============================================================
+calc_gene_set_score_manual <- function(expr_matrix, gene_list) {
+  # 只保留存在的基因
+  genes_exist <- gene_list[gene_list %in% rownames(expr_matrix)]
+  if (length(genes_exist) < 3) {
+    stop("基因集中有效基因太少（<3个），请检查基因名！")
+  }
+  cat("  → 有效基因数：", length(genes_exist), "\n")
+  
+  # 提取子表达矩阵（行=基因，列=样本）
+  sub_expr <- expr_matrix[genes_exist, , drop = FALSE]
+  
+  # 初始化评分矩阵（行=基因，列=样本）
+  z_score_matrix <- matrix(NA, nrow = nrow(sub_expr), ncol = ncol(sub_expr))
+  rownames(z_score_matrix) <- rownames(sub_expr)
+  colnames(z_score_matrix) <- colnames(sub_expr)
+  
+  # 对每个基因，计算其在所有样本中的 Z-score
+  for (i in 1:nrow(sub_expr)) {
+    gene_expr <- as.numeric(sub_expr[i, ])
+    gene_mean <- mean(gene_expr, na.rm = TRUE)
+    gene_sd <- sd(gene_expr, na.rm = TRUE)
+    
+    # 如果标准差为 0（该基因在所有样本中表达完全一致），跳过
+    if (gene_sd == 0) {
+      z_score_matrix[i, ] <- 0
+    } else {
+      z_score_matrix[i, ] <- (gene_expr - gene_mean) / gene_sd
+    }
+  }
+  
+  # 对每个样本，计算基因集内所有基因 Z-score 的平均值
+  sample_scores <- colMeans(z_score_matrix, na.rm = TRUE)
+  
+  return(sample_scores)
+}
+
+# ============================================================
+# 5. 计算两个评分
+# ============================================================
+cat("\n正在计算腹膜损伤评分...\n")
+peritoneal_injury_score <- calc_gene_set_score_manual(expr_matrix, peritoneal_injury_genes)
+
+cat("\n正在计算炎症评分...\n")
+inflammation_score <- calc_gene_set_score_manual(expr_matrix, inflammatory_genes_manual)
+
+# ============================================================
+# 6. 构建临床数据表
+# ============================================================
+sample_names <- colnames(expr_matrix)
+
+# 分组：前20个为 Short (0)，后13个为 Long (1)
+group_numeric <- c(rep(0, 20), rep(1, 13))
+names(group_numeric) <- sample_names
+
+clinical_data <- data.frame(
+  Sample_ID = sample_names,
+  Group = group_numeric[sample_names],
+  peritoneal_injury = round(peritoneal_injury_score, 4),
+  Inflammation_Score = round(inflammation_score, 4),
+  stringsAsFactors = FALSE
+)
+
+clinical_data <- clinical_data[order(clinical_data$Sample_ID), ]
+
+# ============================================================
+# 7. 输出结果
+# ============================================================
+write.csv(clinical_data, 
+          file = "clinical_data.csv", 
+          row.names = FALSE, 
+          quote = FALSE)
+
+write.table(clinical_data, 
+            file = "clinical_data.txt", 
+            sep = "\t", 
+            row.names = FALSE, 
+            quote = FALSE)
+
+# ============================================================
+# 8. 显示结果
+# ============================================================
+cat("\n================== 临床数据表预览 ==================\n")
+print(head(clinical_data, 10))
+cat("\n...\n")
+cat("总样本数：", nrow(clinical_data), "\n")
+cat("短期组 (Group=0)：", sum(clinical_data$Group == 0), "个\n")
+cat("长期组 (Group=1)：", sum(clinical_data$Group == 1), "个\n")
+
+cat("\n腹膜损伤评分范围：", 
+    round(min(clinical_data$peritoneal_injury), 4), " ~ ", 
+    round(max(clinical_data$peritoneal_injury), 4), "\n")
+cat("炎症评分范围：", 
+    round(min(clinical_data$Inflammation_Score), 4), " ~ ", 
+    round(max(clinical_data$Inflammation_Score), 4), "\n")
+
+cat("\n✅ 临床数据表已保存：clinical_data.csv\n")
+cat("=====================================================\n")
+
+# ============================================================
+# 9. 可选：检查两组间评分差异
+# ============================================================
+cat("\n=== 分组间评分差异（t检验） ===\n")
+short_idx <- clinical_data$Group == 0
+long_idx <- clinical_data$Group == 1
+
+t_test1 <- t.test(clinical_data$peritoneal_injury[short_idx], 
+                  clinical_data$peritoneal_injury[long_idx])
+cat("腹膜损伤评分：P =", round(t_test1$p.value, 4), 
+    ifelse(t_test1$p.value < 0.05, " (显著)", " (不显著)"), "\n")
+
+t_test2 <- t.test(clinical_data$Inflammation_Score[short_idx], 
+                  clinical_data$Inflammation_Score[long_idx])
+cat("炎症评分：P =", round(t_test2$p.value, 4), 
+    ifelse(t_test2$p.value < 0.05, " (显著)", " (不显著)"), "\n")
+

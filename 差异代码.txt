@@ -1,0 +1,241 @@
+# ==============================================
+# 0. 加载包
+# ==============================================
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+if (!require("limma")) BiocManager::install("limma")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("ggrepel")) install.packages("ggrepel")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("readxl")) install.packages("readxl")
+
+library(limma)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(readxl)
+
+# ==============================================
+# 1. 设置工作目录
+# ==============================================
+setwd("D:/zhuomian/生信小论文/Step 1")
+cat("当前工作目录：", getwd(), "\n")
+# ==============================================
+# 2. 读取表达矩阵 + 自动分组
+# ==============================================
+# 已解压的txt文件；若用gz压缩包，注释本行并启用下一行
+
+ matrix_file <- gzfile("GSE125498_series_matrix.txt.gz", "rt")
+
+all_lines <- readLines(matrix_file, encoding = "UTF-8")
+
+# 精准定位数据区起止，完全避开注释和结束标记
+start_row <- grep("!series_matrix_table_begin", all_lines) + 1
+end_row <- grep("!series_matrix_table_end", all_lines) - 1
+
+# 用文本向量直接读取，彻底解决末尾结束行导致的列数报错
+expr_probe <- read.table(
+  text = all_lines[start_row:end_row],
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# 自动从元数据提取样本分组（短期/长期PD）
+sample_title_rows <- all_lines[grep("!Sample_title", all_lines)]
+sample_titles <- strsplit(sample_title_rows, "\t")[[1]][-1]
+sample_titles <- gsub("^\\s+|\\s+$|\"", "", sample_titles)
+
+group <- ifelse(grepl("Short-term", sample_titles), "Short", "Long")
+group <- factor(group, levels = c("Short", "Long"))
+names(group) <- colnames(expr_probe)
+
+cat("=== 样本分组验证 ===\n")
+print(table(group))
+cat("====================\n")
+
+# ==============================================
+# 3. 平台注释：探针转基因名（适配你上传的Excel文件，核心修正）
+# ==============================================
+# 关键修正：skip=30 跳过前30行注释，从第31行正式表头开始读取
+platform <- read_excel("GSE125498平台文件.xls", skip = 30)
+
+# 提取探针ID和基因Symbol（列名和你文件完全匹配）
+anno <- platform[, c("ID", "Symbol")]
+colnames(anno) <- c("Probe_ID", "Gene_Symbol")
+
+# 过滤无效探针、空基因名、对照探针
+anno <- anno %>%
+  filter(Gene_Symbol != "" & !is.na(Gene_Symbol)) %>%
+  filter(!grepl("phage|permuted|thrB|lambda|negative", Gene_Symbol, ignore.case = TRUE)) %>%
+  distinct(Probe_ID, .keep_all = TRUE)
+
+# 校验：探针ID格式匹配
+cat("平台探针ID示例：", head(anno$Probe_ID), "\n")
+cat("表达矩阵探针ID示例：", head(rownames(expr_probe)), "\n\n")
+
+# 保留能匹配上的探针
+expr_probe_filtered <- expr_probe[rownames(expr_probe) %in% anno$Probe_ID, ]
+cat("匹配上的探针数：", nrow(expr_probe_filtered), "\n")
+
+# 匹配基因名
+expr_probe_filtered$Gene_Symbol <- anno$Gene_Symbol[match(rownames(expr_probe_filtered), anno$Probe_ID)]
+
+# 多探针对应1个基因时，取平均表达量聚合为基因水平
+expr_gene <- aggregate(
+  . ~ Gene_Symbol,
+  data = expr_probe_filtered,
+  FUN = mean
+)
+rownames(expr_gene) <- expr_gene$Gene_Symbol
+expr_gene <- expr_gene[, -1]
+
+cat("初始基因水平基因数：", nrow(expr_gene), "\n\n")
+
+# ==============================================
+# 【要求1】低表达基因过滤：剔除 AveExpr < 4 的基因
+# ==============================================
+ave_expr_cutoff <- 4  # 如需改为3，直接修改此数值
+gene_ave_expr <- rowMeans(expr_gene)
+expr_gene <- expr_gene[gene_ave_expr >= ave_expr_cutoff, ]
+
+cat("低表达过滤后保留基因数：", nrow(expr_gene), "\n")
+
+# ==============================================
+# 【要求2】基因类型过滤：去除LOC/MGC/RP等非功能预测基因
+# ==============================================
+filter_pattern <- "^LOC|^MGC|^RP[0-9]|^LINC|^CTD-|^AL[0-9]{2}\\.|^AC[0-9]{2}\\."
+keep_genes <- !grepl(filter_pattern, rownames(expr_gene))
+expr_gene <- expr_gene[keep_genes, ]
+
+cat("非功能基因过滤后最终基因数：", nrow(expr_gene), "\n\n")
+
+# ==============================================
+# 4. limma差异分析（【要求3】原始P值<0.05，无多重检验校正）
+# ==============================================
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+
+contrast <- makeContrasts(Long - Short, levels = design)
+
+fit <- lmFit(expr_gene, design)
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)
+
+# 提取全部基因差异结果：adjust = "none" 不做多重校正，仅输出原始P值
+deg_all <- topTable(fit2, adjust = "none", number = Inf)
+deg_all$Gene <- rownames(deg_all)
+deg_all <- deg_all[, c("Gene", "logFC", "AveExpr", "t", "P.Value", "B")]
+
+# 筛选显著差异基因：仅原始 P.Value < 0.05，不设logFC阈值
+deg_sig <- deg_all %>%
+  filter(P.Value < 0.05) %>%
+  mutate(change = ifelse(logFC > 0, "Up", "Down")) %>%
+  arrange(desc(logFC))
+
+cat("=== 差异分析结果（原始P<0.05） ===\n")
+cat("显著差异基因总数：", nrow(deg_sig), "\n")
+cat("上调基因数（长期vs短期）：", sum(deg_sig$change == "Up"), "\n")
+cat("下调基因数（长期vs短期）：", sum(deg_sig$change == "Down"), "\n\n")
+
+# ==============================================
+# 5. 输出结果文件
+# ==============================================
+# 1. 过滤后基因水平表达矩阵
+write.table(
+  expr_gene,
+  "GSE125498_过滤后基因水平表达矩阵.txt",
+  sep = "\t",
+  quote = FALSE,
+  row.names = TRUE,
+  col.names = NA
+)
+
+# 2. 全部基因差异分析结果
+write.table(
+  deg_all,
+  "GSE125498_全部基因差异分析结果.txt",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# 3. 显著差异基因列表（原始P<0.05）
+write.table(
+  deg_sig,
+  "GSE125498_显著差异基因列表_P0.05.txt",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# ==============================================
+# 6. 绘制火山图（【要求4】标注指定功能基因，而非统计学Top10）
+# ==============================================
+# 你指定的核心炎症相关功能基因
+key_up_genes <- c("SOCS1", "FLT3LG", "CYFIP2", "TNFRSF25", "IL2RA", 
+                  "STAT4", "CD79A", "CXCR5", "BLK", "CD24")
+key_down_genes <- c("MEFV", "LRP3")
+all_key_genes <- c(key_up_genes, key_down_genes)
+
+# 构建火山图数据框
+volcano_df <- deg_all
+volcano_df$Group <- "Not significant"
+volcano_df$Group[volcano_df$P.Value < 0.05 & volcano_df$logFC > 0] <- "Up-regulated"
+volcano_df$Group[volcano_df$P.Value < 0.05 & volcano_df$logFC < 0] <- "Down-regulated"
+volcano_df$Group <- factor(volcano_df$Group,
+                           levels = c("Up-regulated", "Down-regulated", "Not significant"))
+
+# 提取需要标注的功能基因（自动跳过数据集中不存在的基因）
+label_genes <- volcano_df %>%
+  filter(Gene %in% all_key_genes)
+
+p_volcano <- ggplot(volcano_df, aes(x = logFC, y = -log10(P.Value), color = Group)) +
+  geom_point(alpha = 0.7, size = 1.2) +
+  # 配色：上调红、下调蓝、非显著灰
+  scale_color_manual(
+    values = c("Up-regulated" = "#E64B35", "Down-regulated" = "#4DBBD5", "Not significant" = "gray80"),
+    labels = c("上调", "下调", "不显著")
+  ) +
+  # 辅助线：P=0.05水平线，logFC=0竖线
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  # 标注指定功能基因
+  geom_text_repel(
+    data = label_genes,
+    aes(label = Gene),
+    size = 3.5,
+    max.overlaps = 30,
+    show.legend = FALSE,
+    box.padding = 0.4,
+    segment.color = "gray60"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    legend.title = element_blank(),
+    legend.position = "top",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 13, hjust = 0.5)
+  ) +
+  labs(
+    x = "log2(Fold Change) (Long-term vs Short-term PD)",
+    y = "-log10(P value)",
+    title = "短期PD vs 长期PD 差异基因火山图"
+  )
+
+# 保存高清图片
+ggsave("GSE125498_差异基因火山图.pdf", p_volcano, width = 8, height = 7, dpi = 300)
+ggsave("GSE125498_差异基因火山图.png", p_volcano, width = 8, height = 7, dpi = 300)
+
+print(p_volcano)
+cat("\n✅ 分析完成！所有结果已输出到工作目录。\n")
+cat("已实现你的4项要求：\n")
+cat("1. 火山图标注指定的12个炎症相关功能基因\n")
+cat("2. 差异阈值使用原始P值<0.05，未做多重检验校正\n")
+cat("3. 过滤了AveExpr<4的低表达基因\n")
+cat("4. 过滤了LOC/MGC/RP等非功能预测基因\n")
+

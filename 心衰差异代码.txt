@@ -1,0 +1,170 @@
+# ============================================================
+# GSE116250 心衰端差异分析（修正读取方式）
+# ============================================================
+
+library(limma)
+library(ggplot2)
+library(dplyr)
+
+setwd("D:/zhuomian/生信小论文/Step 1")
+if(!dir.exists("results_GSE116250")) dir.create("results_GSE116250")
+
+# ============================================================
+# 2. 读取数据（修正：不设置行名，读取后手动处理）
+# ============================================================
+
+cat("正在读取 GSE116250_rpkm.txt.gz...\n")
+
+# 方法一：不设置行名，直接读取
+# 第一列是基因名，可能有重复，我们读取后手动去重
+expr_raw <- read.delim(gzfile("GSE116250_rpkm.txt.gz"), 
+                       header = TRUE, 
+                       check.names = FALSE,
+                       stringsAsFactors = FALSE)
+
+cat("数据维度：", dim(expr_raw), "\n")
+cat("前几列名：", paste(head(colnames(expr_raw)), collapse = ", "), "\n")
+
+# 查看第一列（基因名）
+cat("第一列名称：", colnames(expr_raw)[1], "\n")
+cat("基因名示例：", paste(head(expr_raw[, 1]), collapse = ", "), "\n")
+
+# ============================================================
+# 3. 处理基因名：去重
+# ============================================================
+
+# 将第一列作为基因名
+gene_names <- expr_raw[, 1]
+
+# 检查是否有重复
+if (any(duplicated(gene_names))) {
+  cat("⚠️ 发现重复基因名，保留第一个出现的\n")
+  expr_raw <- expr_raw[!duplicated(gene_names), ]
+  gene_names <- expr_raw[, 1]
+}
+
+# 将基因名设为行名，删除第一列
+rownames(expr_raw) <- gene_names
+expr_raw <- expr_raw[, -1]
+
+cat("最终样本数：", ncol(expr_raw), "\n")
+cat("最终基因数：", nrow(expr_raw), "\n")
+
+# ============================================================
+# 4. 构建分组信息（根据样本名自动匹配）
+# ============================================================
+
+sample_names <- colnames(expr_raw)
+cat("样本名称示例：", paste(head(sample_names, 10), collapse = ", "), "\n")
+
+# 根据样本名判断分组
+group_labels <- case_when(
+  grepl("^NF", sample_names) ~ "Normal",
+  grepl("^DCM|^ICM", sample_names) ~ "HeartFailure",
+  TRUE ~ NA_character_
+)
+
+# 检查未分配的样本
+unassigned <- sample_names[is.na(group_labels)]
+if (length(unassigned) > 0) {
+  cat("⚠️ 未分配的样本：", paste(unassigned, collapse = ", "), "\n")
+}
+
+# 查看分组统计
+cat("\n样本分组统计：\n")
+print(table(group_labels))
+
+# 只保留正常和心衰样本
+keep <- !is.na(group_labels)
+expr_filtered <- expr_raw[, keep]
+group_filtered <- group_labels[keep]
+
+cat("\n分析样本数：", ncol(expr_filtered), "\n")
+cat("正常样本：", sum(group_filtered == "Normal"), "\n")
+cat("心衰样本：", sum(group_filtered == "HeartFailure"), "\n")
+
+# ============================================================
+# 5. 继续后续分析...
+# ============================================================
+
+# 过滤低表达基因
+keep_genes <- rowSums(expr_filtered > 1) >= 0.5 * ncol(expr_filtered)
+expr_filtered <- expr_filtered[keep_genes, ]
+cat("过滤后基因数：", nrow(expr_filtered), "\n")
+
+# 差异分析
+expr_log <- log2(expr_filtered + 1)
+group <- factor(group_filtered, levels = c("Normal", "HeartFailure"))
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+contrast_matrix <- makeContrasts(HeartFailure - Normal, levels = design)
+
+fit <- lmFit(expr_log, design)
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2, trend = TRUE)
+
+results <- topTable(fit2, coef = "HeartFailure - Normal", number = Inf, adjust.method = "BH")
+results$Gene <- rownames(results)
+results$change <- ifelse(results$logFC > 0, "Up", "Down")
+
+# 保存结果
+write.csv(results, "results_GSE116250/DE_results.csv", row.names = FALSE)
+
+# 显著差异基因
+sig_results <- results[results$adj.P.Val < 0.05 & abs(results$logFC) > 1, ]
+write.csv(sig_results, "results_GSE116250/Significant_DE_genes.csv", row.names = FALSE)
+
+cat("\n========== 差异分析结果 ==========\n")
+cat("显著上调基因数：", sum(sig_results$logFC > 0), "\n")
+cat("显著下调基因数：", sum(sig_results$logFC < 0), "\n")
+cat("====================================\n")
+
+# ============================================================
+# 6. 火山图
+# ============================================================
+
+results$sig_group <- "Not Significant"
+results$sig_group[results$adj.P.Val < 0.05 & results$logFC > 1] <- "Up"
+results$sig_group[results$adj.P.Val < 0.05 & results$logFC < -1] <- "Down"
+
+p_volcano <- ggplot(results, aes(x = logFC, y = -log10(adj.P.Val), color = sig_group)) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  scale_color_manual(values = c("Up" = "red", "Down" = "blue", "Not Significant" = "gray")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "GSE116250: Heart Failure vs Normal",
+    x = "log2 Fold Change",
+    y = "-log10(Adjusted P-value)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+ggsave("results_GSE116250/Volcano_plot.pdf", p_volcano, width = 10, height = 8)
+ggsave("results_GSE116250/Volcano_plot.png", p_volcano, width = 10, height = 8, dpi = 300)
+cat("✅ 火山图已保存\n")
+
+# ============================================================
+# 7. 热图（Top 50 差异基因）
+# ============================================================
+
+if (nrow(sig_results) > 5) {
+  top_genes <- rownames(sig_results)[1:min(50, nrow(sig_results))]
+  library(pheatmap)
+  expr_top <- expr_log[top_genes, ]
+  annotation_col <- data.frame(Group = group_filtered)
+  rownames(annotation_col) <- colnames(expr_top)
+  
+  pdf("results_GSE116250/Top50_heatmap.pdf", width = 12, height = 10)
+  pheatmap(expr_top, 
+           scale = "row",
+           annotation_col = annotation_col,
+           show_colnames = FALSE,
+           main = "Top 50 Differentially Expressed Genes")
+  dev.off()
+  cat("✅ Top 50 热图已保存\n")
+}
+
+cat("\n✅ GSE116250 差异分析完成！\n")
+cat("结果保存在：results_GSE116250/\n")
+

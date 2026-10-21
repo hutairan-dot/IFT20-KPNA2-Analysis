@@ -1,0 +1,140 @@
+# ============================================================
+# 修复：孟德尔随机化分析（IVW 方法）
+# ============================================================
+
+cat("\n=== 孟德尔随机化分析 ===\n")
+
+# Wald ratio
+mr_estimates <- outcome_aligned$beta / exposure_aligned$beta
+mr_se <- sqrt(
+  (outcome_aligned$se / exposure_aligned$beta)^2 + 
+    (exposure_aligned$se * outcome_aligned$beta / exposure_aligned$beta^2)^2
+)
+
+# 方法1：使用 metagen 固定效应模型（修正版）
+# 使用 method.tau = "DL" 然后设置固定效应
+# 或者直接使用 rma 函数
+
+# 方法2：使用 meta 包的固定效应模型
+# 在 meta 包中，固定效应模型通过设置 method.tau = "FE" 
+# 但某些版本不支持，使用 "DL" 并设置 fixed = TRUE
+
+if (require(meta, quietly = TRUE)) {
+  meta_result <- tryCatch({
+    metagen(
+      TE = mr_estimates,
+      seTE = mr_se,
+      sm = "OR",
+      method.tau = "DL",  # 使用 DL 方法，然后固定效应
+      fixed = TRUE,       # 使用固定效应模型
+      random = FALSE      # 不使用随机效应
+    )
+  }, error = function(e) {
+    cat("⚠️ metagen 失败，使用备选方法...\n")
+    NULL
+  })
+}
+
+# 方法3：如果 metagen 失败，手动计算 IVW 结果
+if (is.null(meta_result)) {
+  cat("使用手动计算 IVW 结果...\n")
+  
+  # IVW 固定效应模型（手动计算）
+  weights <- 1 / mr_se^2
+  beta_ivw <- sum(weights * mr_estimates) / sum(weights)
+  se_ivw <- sqrt(1 / sum(weights))
+  z_score <- beta_ivw / se_ivw
+  p_value <- 2 * pnorm(-abs(z_score))
+  
+  # 异质性检验（Cochran's Q）
+  q_stat <- sum(weights * (mr_estimates - beta_ivw)^2)
+  df_q <- length(mr_estimates) - 1
+  q_pval <- pchisq(q_stat, df_q, lower.tail = FALSE)
+  
+  cat("\n========== MR 结果（手动计算）==========\n")
+  cat("IVW 估计值 (beta)：", round(beta_ivw, 4), "\n")
+  cat("标准误：", round(se_ivw, 4), "\n")
+  cat("Z 值：", round(z_score, 3), "\n")
+  cat("P 值：", format(p_value, scientific = TRUE, digits = 3), "\n")
+  cat("OR 值：", round(exp(beta_ivw), 3), "\n")
+  cat("95% CI：", round(exp(beta_ivw - 1.96 * se_ivw), 3), 
+      "-", round(exp(beta_ivw + 1.96 * se_ivw), 3), "\n")
+  cat("\n异质性检验：\n")
+  cat("Q 统计量：", round(q_stat, 3), "\n")
+  cat("P 值：", format(q_pval, scientific = TRUE, digits = 3), "\n")
+  
+  # 保存手动计算结果
+  mr_results <- data.frame(
+    Method = "IVW (Fixed effects)",
+    Beta = beta_ivw,
+    SE = se_ivw,
+    P_value = p_value,
+    OR = exp(beta_ivw),
+    OR_lower = exp(beta_ivw - 1.96 * se_ivw),
+    OR_upper = exp(beta_ivw + 1.96 * se_ivw)
+  )
+  write.csv(mr_results, "results_MR/IFT20_MR_results.csv", row.names = FALSE)
+  
+} else {
+  # 如果 metagen 成功，输出结果
+  cat("\n========== MR 结果 ==========\n")
+  cat("IVW 估计值 (beta)：", round(meta_result$TE.fixed, 4), "\n")
+  cat("标准误：", round(meta_result$seTE.fixed, 4), "\n")
+  cat("P 值：", format(meta_result$pval.fixed, scientific = TRUE, digits = 3), "\n")
+  cat("OR 值：", round(exp(meta_result$TE.fixed), 3), "\n")
+  cat("95% CI：", round(exp(meta_result$TE.fixed - 1.96 * meta_result$seTE.fixed), 3), 
+      "-", round(exp(meta_result$TE.fixed + 1.96 * meta_result$seTE.fixed), 3), "\n")
+  
+  if (!is.null(meta_result$Q)) {
+    cat("\n异质性检验：\n")
+    cat("Q 统计量：", round(meta_result$Q, 3), "\n")
+    cat("P 值：", format(meta_result$pval.Q, scientific = TRUE, digits = 3), "\n")
+  }
+}
+
+# ============================================================
+# 备选：使用 metafor 包进行 MR 分析
+# ============================================================
+
+# 如果 meta 包始终无法正常工作，可以使用 metafor 包
+if (!require(metafor, quietly = TRUE)) {
+  install.packages("metafor")
+}
+library(metafor)
+
+cat("\n=== 使用 metafor 包进行 MR 分析 ===\n")
+
+# 使用 rma 函数进行固定效应元分析
+tryCatch({
+  rma_result <- rma(yi = mr_estimates, sei = mr_se, method = "FE")
+  
+  cat("\n========== MR 结果（metafor）==========\n")
+  cat("IVW 估计值 (beta)：", round(rma_result$b, 4), "\n")
+  cat("标准误：", round(rma_result$se, 4), "\n")
+  cat("P 值：", format(rma_result$pval, scientific = TRUE, digits = 3), "\n")
+  cat("OR 值：", round(exp(rma_result$b), 3), "\n")
+  cat("95% CI：", round(exp(rma_result$b - 1.96 * rma_result$se), 3), 
+      "-", round(exp(rma_result$b + 1.96 * rma_result$se), 3), "\n")
+  
+  # 异质性检验
+  cat("\n异质性检验：\n")
+  cat("Q 统计量：", round(rma_result$QE, 3), "\n")
+  cat("P 值：", format(rma_result$QEp, scientific = TRUE, digits = 3), "\n")
+  
+  # 保存结果
+  mr_results_metafor <- data.frame(
+    Method = "IVW (Fixed effects)",
+    Beta = as.numeric(rma_result$b),
+    SE = as.numeric(rma_result$se),
+    P_value = as.numeric(rma_result$pval),
+    OR = exp(as.numeric(rma_result$b)),
+    OR_lower = exp(as.numeric(rma_result$b) - 1.96 * as.numeric(rma_result$se)),
+    OR_upper = exp(as.numeric(rma_result$b) + 1.96 * as.numeric(rma_result$se))
+  )
+  write.csv(mr_results_metafor, "results_MR/IFT20_MR_results_metafor.csv", row.names = FALSE)
+  
+}, error = function(e) {
+  cat("⚠️ metafor 分析失败：", e$message, "\n")
+})
+
+cat("\n✅ MR 分析完成！结果保存在 results_MR/\n")

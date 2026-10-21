@@ -1,0 +1,231 @@
+#===================== WGCNA完整适配代码（匹配你的文件目录） =====================
+# 1. 环境初始化
+rm(list = ls())
+gc()
+
+# 设置工作目录（你的文件夹）
+work_path <- "D:/zhuomian/生信小论文/Step 1"
+if (!dir.exists(work_path)) dir.create(work_path, recursive = TRUE)
+setwd(work_path)
+
+# 创建结果文件夹
+res_dir <- "results_WGCNA"
+if(!dir.exists(res_dir)) dir.create(res_dir)
+
+# 加载包
+library(WGCNA)
+library(dplyr)
+
+#===================== 2. 读取表达矩阵 & 临床数据 =====================
+# 读取过滤后表达矩阵：行=基因，列=样本
+expr <- read.delim("GSE125498_过滤后基因水平表达矩阵.txt",
+                   header = TRUE, row.names = 1, check.names = FALSE)
+# 临床表型
+clinical <- read.csv("clinical_data.csv", header = TRUE, row.names = 1)
+
+# WGCNA标准格式：行=样本，列=基因
+mmdata <- as.data.frame(t(expr))
+cat("原始数据：样本",nrow(mmdata)," 基因",ncol(mmdata),"\n")
+
+#===================== 3. 高方差基因筛选（保留前75%方差） =====================
+m.vars <- apply(mmdata, 2, var)
+# quantile四分位，取top75%
+var_cut <- quantile(m.vars, probs = 0.25)
+expro.upper <- mmdata[, m.vars > var_cut]
+mmExpr <- data.matrix(expro.upper)
+cat("方差过滤后剩余基因：",ncol(mmExpr),"\n")
+
+#===================== 4. 坏基因/坏样本过滤 =====================
+GeneExpr <- goodSamplesGenes(mmExpr, verbose = 0)
+if (!GeneExpr$allOK){
+  if (sum(!GeneExpr$goodGenes) > 0)
+    print(paste("剔除低质量基因：", paste(names(mmdata)[!GeneExpr$goodGenes], collapse = ", ")))
+  if (sum(!GeneExpr$goodSamples) > 0)
+    print(paste("剔除低质量样本：", paste(rownames(mmExpr)[!GeneExpr$goodSamples], collapse = ", ")))
+  mmExpr <- mmExpr[GeneExpr$goodSamples, GeneExpr$goodGenes]
+}
+
+#===================== 5. 样本聚类图（检测离群样本） =====================
+sampleTree <- hclust(dist(mmExpr), method = "average")
+pdf(paste0(res_dir,"/01_Sample_dendrogram.pdf"), width = 22, height = 10)
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="",
+     cex.lab = 1.2, cex.axis = 1.2, cex.main = 1.5)
+dev.off()
+cat("✅ 样本聚类图保存\n")
+
+# 根据树裁剪离群样本（可自行调整cutHeight）
+clust <- cutreeStatic(sampleTree, cutHeight = 80, minSize = 3)
+keepSamples <- (clust == 1)
+datExpr <- mmExpr[keepSamples, ]
+nGenes <- ncol(datExpr)
+nSamples <- nrow(datExpr)
+cat("剔除离群后样本数：",nSamples,"\n")
+
+# 临床表型同步匹配剩余样本
+clinical <- clinical[rownames(datExpr), , drop = FALSE]
+
+#===================== 6. 软阈值筛选绘图 =====================
+powers <- c(1:10, seq(12, 30, by = 2))
+sft <- pickSoftThreshold(datExpr, powerVector = powers, verbose = 0)
+
+pdf(paste0(res_dir,"/02_Soft_threshold.pdf"), width = 12, height = 5)
+par(mfrow = c(1, 2))
+cex1 = 0.9
+# 左图：无尺度R²
+plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)", ylab = "Scale Free Topology R^2", type = "n",
+     main = "Scale independence")
+text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, cex = cex1, col = "red")
+abline(h = 0.85, col = "red")
+# 右图：平均连通度
+plot(sft$fitIndices[, 1], sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)", ylab = "Mean Connectivity", type = "n",
+     main = "Mean connectivity")
+text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, cex = cex1, col = "red")
+dev.off()
+cat("✅ 软阈值图保存\n")
+
+# 自动选取最小power满足R²≥0.85
+fitTab <- sft$fitIndices
+candidate <- fitTab[fitTab$SFT.R.sq >= 0.85, ]
+if(nrow(candidate) > 0){
+  power <- min(candidate$Power)
+}else{
+  power <- fitTab$Power[which.max(fitTab$SFT.R.sq)]
+}
+power <- max(power,6)
+cat("选定软阈值 power =", power,"\n")
+
+#===================== 7. blockwise分块构建网络（不爆内存、输出标准基因树） =====================
+net <- blockwiseModules(
+  datExpr,
+  power = power,
+  TOMType = "signed",
+  minModuleSize = 30,
+  reassignThreshold = 0,
+  mergeCutHeight = 0.75,
+  numericLabels = TRUE,
+  pamRespectsDendro = FALSE,
+  saveTOMs = FALSE,
+  maxBlockSize = 5000,
+  verbose = 0
+)
+
+moduleLabels <- net$colors
+mergedColors <- labels2colors(moduleLabels)
+MEs <- net$MEs
+geneTree <- net$dendrograms[[1]]
+
+# 论文标准基因树（带模块彩色条，无密集黑块）
+pdf(paste0(res_dir,"/03_Gene_dendrogram.pdf"), width = 16, height = 7)
+plotDendroAndColors(
+  dendro = geneTree,
+  colors = mergedColors[net$blockGenes[[1]]],
+  groupLabels = "Gene Modules",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05,
+  main = "Gene clustering dendrogram with module color bands"
+)
+dev.off()
+cat("✅ 可发表基因聚类树（Dendrogram）保存\n")
+
+# 导出全部模块-基因对应表
+module_genes <- data.frame(Gene = colnames(datExpr), Module = mergedColors, stringsAsFactors = F)
+write.csv(module_genes, paste0(res_dir,"/04_Module_gene_lists.csv"), row.names = FALSE)
+cat("\n模块统计（不含grey）：\n")
+print(table(mergedColors[mergedColors != "grey"]))
+
+#===================== 8. 模块-表型关联热图 =====================
+MEs0 <- moduleEigengenes(datExpr, mergedColors)$eigengenes
+MEsWW <- orderMEs(MEs0)
+# 表型自动对齐样本
+datTraits <- clinical[, c("Group", "peritoneal_injury", "Inflammation_Score")]
+modTraitCor <- cor(MEsWW, datTraits, use = "p")
+modTraitP <- corPvalueStudent(modTraitCor, nSamples)
+
+# 热图文本
+textMatrix <- paste0(round(modTraitCor, 2), "\n(", signif(modTraitP, 2), ")")
+dim(textMatrix) <- dim(modTraitCor)
+
+# 美化宽幅热图，标签不重叠
+pdf(paste0(res_dir,"/05_Module_trait_heatmap.pdf"), width = 12, height = max(9, ncol(MEsWW)*0.9))
+par(mar = c(10,7,2,2))
+labeledHeatmap(
+  Matrix = modTraitCor,
+  xLabels = colnames(datTraits),
+  yLabels = names(MEsWW),
+  ySymbols = names(MEsWW),
+  colorLabels = FALSE,
+  colors = blueWhiteRed(50),
+  textMatrix = textMatrix,
+  setStdMargins = FALSE,
+  cex.text = 0.7,
+  cex.lab = 0.8,
+  xLabelsAngle = 45,
+  xLabelsAdj = 1,
+  zlim = c(-1, 1),
+  main = "Module-trait relationships"
+)
+dev.off()
+cat("✅ 模块-性状关联热图保存\n")
+
+# 筛选P<0.05显著模块并导出表格
+sigDF <- data.frame()
+for(i in 1:nrow(modTraitCor)){
+  for(j in 1:ncol(modTraitCor)){
+    if(modTraitP[i,j] < 0.05){
+      sigDF <- rbind(sigDF, data.frame(
+        Module = rownames(modTraitCor)[i],
+        Trait = colnames(datTraits)[j],
+        Correlation = modTraitCor[i,j],
+        Pvalue = modTraitP[i,j]
+      ))
+    }
+  }
+}
+write.csv(sigDF, paste0(res_dir,"/06_Significant_module_traits.csv"), row.names = FALSE)
+cat("\n================== 显著模块-表型结果 ==================\n")
+if(nrow(sigDF) > 0){
+  print(sigDF)
+}else{
+  cat("无P<0.05显著关联模块\n")
+}
+
+#===================== 9. 分模块导出基因 + 差异基因交集候选集（解决txt空白） =====================
+if(nrow(sigDF) > 0){
+  sigModList <- unique(sigDF$Module)
+  sigGeneAll <- module_genes[module_genes$Module %in% sigModList, "Gene"]
+  
+  # 分模块导出txt
+  for(mod in sigModList){
+    mod_genes <- module_genes[module_genes$Module == mod, "Gene"]
+    write.table(mod_genes,
+                paste0(res_dir,"/08_Module_",mod,"_genes.txt"),
+                row.names=F, col.names=F, quote=F)
+  }
+  
+  # 读取差异基因，仅保留过滤后存在的基因（避免交集为空）
+  deg <- read.delim("GSE125498_显著差异基因列表_P0.05.txt", header = TRUE)
+  deg_genes <- deg$Gene
+  deg_filter <- intersect(deg_genes, colnames(datExpr))
+  candidate_genes <- intersect(sigGeneAll, deg_filter)
+  
+  write.table(candidate_genes,
+              paste0(res_dir,"/09_Candidate_genes_for_ML.txt"),
+              row.names=F, col.names=F, quote=F)
+  
+  cat("\n候选基因总数（DEG∩显著模块）：",length(candidate_genes),"\n")
+  if(length(candidate_genes) > 0){
+    cat("前10个候选基因：",paste(head(candidate_genes,10),collapse = ", "),"\n")
+  }else{
+    cat("交集为空：差异基因与模块无重叠\n")
+  }
+}else{
+  cat("\n⚠️ 无显著模块，不输出基因文件\n")
+}
+
+cat("\n==================== WGCNA全流程运行完毕 ====================\n")
+
